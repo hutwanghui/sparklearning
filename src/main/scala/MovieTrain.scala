@@ -1,16 +1,19 @@
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.mllib.recommendation.{ALS, MatrixFactorizationModel, Rating}
-import org.apache.spark.rdd._
-import org.apache.spark.{SparkContext, SparkConf}
+import org.apache.spark.{SparkConf, SparkContext}
+import java.sql.{Connection, DriverManager, ResultSet}
+
+import org.apache.spark.rdd.RDD
+
 import scala.io.Source
+import scala.util.Random
 
 /**
-  * Created by msi- on 2018/7/6.
+  * Created by msi- on 2018/7/12.
   */
-object MovieCF {
-  def main(args: Array[String]) {
 
-
+object MovieTrain {
+  def main(args: Array[String]): Unit = {
     //屏蔽不必要的日志显示在终端上
 
     Logger.getLogger("org.apache.spark").setLevel(Level.WARN)
@@ -20,11 +23,11 @@ object MovieCF {
 
     //设置运行环境
 
-    val sparkConf = new SparkConf().setAppName("MovieCF").setMaster("spark://master:7077").set("spark.executor.memory", "1g")
+    val sparkConf = new SparkConf().setAppName("com.kk.MovieTrain").setMaster("local")
 
     val sc = new SparkContext(sparkConf)
 
-
+    sc.setCheckpointDir("/home/spark/checkpoint")
     //装载用户评分，该评分由评分器生成(即生成文件personalRatings.txt)
 
     val myRatings = loadRatings(args(1))
@@ -97,10 +100,16 @@ object MovieCF {
 
     val numTest = test.count()
 
-    println("Training: " + numTraining + " validation: " + numValidation + " test: " + numTest)
+    println("Training: " + numTraining + " validation: " + numValidation + " com.kk.test: " + numTest)
 
 
     //训练不同参数下的模型，并在校验集中验证，获取最佳参数下的模型
+    //numBlocks 是用于并行化计算的分块个数 (设置为-1为自动配置)。
+    //rank 是模型中隐语义因子的个数。即特征数量
+    //iterations 是迭代的次数。
+    //lambda 是ALS的正则因子（spark的推荐值是0.01）
+    //implicitPrefs 决定了是用显性反馈ALS的版本还是用适用隐性反馈数据集的版本。
+    //alpha 是一个针对于隐性反馈 ALS 版本的参数，这个参数决定了偏好行为强度的基准。
 
     val ranks = List(8, 12)
 
@@ -142,80 +151,40 @@ object MovieCF {
 
         bestNumIter = numIter
 
+
       }
 
-    }
-
-
-    //用最佳模型预测测试集的评分，并计算和实际评分之间的均方根误差（RMSE）
-
-    val testRmse = computeRmse(bestModel.get, test, numTest)
-
-    println("The best model was trained with rank = " + bestRank + " and lambda = " + bestLambda
-
-      + ", and numIter = " + bestNumIter + ", and its RMSE on the test set is " + testRmse + ".")
-
-
-    //create a naive baseline and compare it with the best model
-
-    val meanRating = training.union(validation).map(_.rating).mean
-
-    val baselineRmse = math.sqrt(test.map(x => (meanRating - x.rating) * (meanRating - x.rating)).reduce(_ + _) / numTest)
-
-    val improvement = (baselineRmse - testRmse) / baselineRmse * 100
-
-    println("The best model improves the baseline by " + "%1.2f".format(improvement) + "%.")
-
-
-    //推荐前十部最感兴趣的电影，注意要剔除用户已经评分的电影
-
-    val myRatedMovieIds = myRatings.map(_.product).toSet
-
-    val candidates = sc.parallelize(movies.keys.filter(!myRatedMovieIds.contains(_)).toSeq)
-
-    val recommendations = bestModel.get
-
-      .predict(candidates.map((0, _)))
-
-      .collect
-
-      .sortBy(-_.rating)
-
-      .take(10)
-
-    var i = 1
-
-    println("Movies recommended for you:")
-
-    recommendations.foreach { r =>
-
-      println("%2d".format(i) + ": " + movies(r.product))
-
-      i += 1
 
     }
+    val ModelPath = "file:////home/spark/ALS_Model"
 
-
+    bestModel.get.save(sc, ModelPath)
     sc.stop()
+    /*
+
+        println(s"ModelPath 矩阵保存= ${ModelPath}")
+        //用最佳模型预测测试集的评分，并计算和实际评分之间的均方根误差（RMSE）
+
+        val testRmse = computeRmse(bestModel.get, test, numTest)
+
+        println("The best model was trained with rank = " + bestRank + " and lambda = " + bestLambda
+
+          + ", and numIter = " + bestNumIter + ", and its RMSE on the com.kk.test set is " + testRmse + ".")
+
+
+        //create a naive baseline and compare it with the best model
+
+        val meanRating = training.union(validation).map(_.rating).mean
+
+        val baselineRmse = math.sqrt(test.map(x => (meanRating - x.rating) * (meanRating - x.rating)).reduce(_ + _) / numTest)
+
+        val improvement = (baselineRmse - testRmse) / baselineRmse * 100
+
+        println("The best model improves the baseline by " + "%1.2f".format(improvement) + "%.")
+
+    */
 
   }
-
-
-  /** 校验集预测数据和实际数据之间的均方根误差 **/
-
-  def computeRmse(model: MatrixFactorizationModel, data: RDD[Rating], n: Long): Double = {
-
-
-    val predictions: RDD[Rating] = model.predict((data.map(x => (x.user, x.product))))
-
-    val predictionsAndRatings = predictions.map { x => ((x.user, x.product), x.rating) }
-
-      .join(data.map(x => ((x.user, x.product), x.rating))).values
-
-    math.sqrt(predictionsAndRatings.map(x => (x._1 - x._2) * (x._1 - x._2)).reduce(_ + _) / n)
-
-  }
-
 
   /** 装载用户评分文件 personalRatings.txt **/
 
@@ -242,6 +211,21 @@ object MovieCF {
       ratings.toSeq
 
     }
+
+  }
+
+  /** 校验集预测数据和实际数据之间的均方根误差 **/
+
+  def computeRmse(model: MatrixFactorizationModel, data: RDD[Rating], n: Long): Double = {
+
+
+    val predictions: RDD[Rating] = model.predict((data.map(x => (x.user, x.product))))
+
+    val predictionsAndRatings = predictions.map { x => ((x.user, x.product), x.rating) }
+
+      .join(data.map(x => ((x.user, x.product), x.rating))).values
+
+    math.sqrt(predictionsAndRatings.map(x => (x._1 - x._2) * (x._1 - x._2)).reduce(_ + _) / n)
 
   }
 
